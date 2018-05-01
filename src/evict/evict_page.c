@@ -106,18 +106,27 @@ __wt_evict(WT_SESSION_IMPL *session, WT_REF *ref, bool closing)
 	WT_PAGE *page;
 	WT_PAGE_MODIFY *mod;
 	uint32_t flags;
-	bool clean_page, tree_dead;
+	bool clean_page, local_gen, tree_dead;
 
 	conn = S2C(session);
+	page = ref->page;
+	local_gen = false;
 
 	/* Checkpoints should never do eviction. */
 	WT_ASSERT(session, !WT_SESSION_IS_CHECKPOINT(session));
 
-	page = ref->page;
-	tree_dead = F_ISSET(session->dhandle, WT_DHANDLE_DEAD);
-
 	__wt_verbose(session, WT_VERB_EVICT,
 	    "page %p (%s)", (void *)page, __wt_page_type_string(page->type));
+
+	/*
+	 * Enter the eviction generation. If we re-enter eviction, leave the
+	 * previous eviction generation (which must be as low as the current
+	 * generation), untouched.
+	 */
+	if (__wt_session_gen(session, WT_GEN_EVICT) == 0) {
+		local_gen = true;
+		__wt_session_gen_enter(session, WT_GEN_EVICT);
+	}
 
 	/*
 	 * Get exclusive access to the page and review it for conditions that
@@ -154,6 +163,7 @@ __wt_evict(WT_SESSION_IMPL *session, WT_REF *ref, bool closing)
 	clean_page = mod == NULL || mod->rec_result == 0;
 
 	/* Update the reference and discard the page. */
+	tree_dead = F_ISSET(session->dhandle, WT_DHANDLE_DEAD);
 	if (__wt_ref_is_root(ref))
 		__wt_ref_out(session, ref);
 	else if ((clean_page && !F_ISSET(conn, WT_CONN_IN_MEMORY)) || tree_dead)
@@ -181,6 +191,10 @@ err:		if (!closing)
 		WT_STAT_CONN_INCR(session, cache_eviction_fail);
 		WT_STAT_DATA_INCR(session, cache_eviction_fail);
 	}
+
+done:	/* Leave any local eviction generation. */
+	if (local_gen)
+		__wt_session_gen_leave(session, WT_GEN_EVICT);
 
 	return (ret);
 }
